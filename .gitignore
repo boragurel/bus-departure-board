@@ -1,0 +1,16 @@
+# Project docs (local only, not for GitHub)
+project-reference.md
+session-log.md
+
+# Environment and secrets
+.env
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+*.log.*
