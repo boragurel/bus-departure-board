@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Bus Board</title>
+<style>
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    background: #1a1a1a;
+    color: #f5c842;
+    font-family: 'Courier New', Courier, monospace;
+    padding: 12px;
+    min-height: 100vh;
+  }
+
+  .section-header {
+    font-size: 13px;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+    margin-top: 24px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #555;
+  }
+
+  .section-header:first-child {
+    margin-top: 0;
+  }
+
+  .stop-block {
+    margin-bottom: 20px;
+  }
+
+  .stop-name {
+    font-size: 15px;
+    font-weight: bold;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #3a3a3a;
+    margin-bottom: 6px;
+  }
+
+  .bus-row {
+    display: flex;
+    align-items: baseline;
+    padding: 4px 0;
+    font-size: 14px;
+  }
+
+  .bus-route {
+    width: 28px;
+    flex-shrink: 0;
+  }
+
+  .bus-destination {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .bus-time {
+    width: 70px;
+    text-align: right;
+    flex-shrink: 0;
+    margin-left: 8px;
+  }
+
+  .bus-time.countdown {
+    color: #4ade80;
+  }
+
+  .bus-time.due {
+    color: #4ade80;
+  }
+
+  .bus-tracking {
+    width: 130px;
+    text-align: right;
+    flex-shrink: 0;
+    margin-left: 8px;
+    font-size: 12px;
+    color: #b8962e;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .bus-id {
+    width: 80px;
+    text-align: right;
+    flex-shrink: 0;
+    margin-left: 8px;
+    font-size: 10px;
+    color: #555;
+  }
+
+  .bus-row.departed {
+    opacity: 0.4;
+  }
+
+  .bus-time.departed-text {
+    color: #ff6b6b;
+  }
+
+  .no-buses {
+    padding: 4px 0;
+    font-size: 13px;
+    color: #666;
+  }
+
+  .footer {
+    margin-top: 16px;
+    text-align: right;
+    font-size: 11px;
+    color: #666;
+  }
+  @media (max-width: 600px) {
+    .bus-id { display: none; }
+    .bus-route { width: 30px; margin-right: 4px; }
+    .bus-time { width: 55px; margin-left: 4px; }
+    .bus-tracking { width: 90px; margin-left: 8px; font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="board"></div>
+<div id="footer"></div>
+
+<script>
+
+// ===========================================
+// UTILITIES
+// ===========================================
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ===========================================
+// CONSTANTS
+// ===========================================
+
+const COUNTDOWN_THRESHOLD = 30;  // "due" below this many seconds
+
+// ===========================================
+// STATE
+// ===========================================
+
+let lastSuccess = 0;
+let countdownTimer = null;
+let currentData = null;
+let departedBuses = {};
+let eventSource = null;
+
+// ===========================================
+// RENDERING
+// ===========================================
+
+function formatTime(seconds) {
+  if (seconds <= COUNTDOWN_THRESHOLD) return 'due';
+  return Math.floor((seconds + 30) / 60) + ' min';
+}
+
+function getTimeClass(seconds) {
+  if (seconds <= 0) return 'due';
+  if (seconds <= COUNTDOWN_THRESHOLD) return 'countdown';
+  return '';
+}
+
+function render(data) {
+  const board = document.getElementById('board');
+  const footer = document.getElementById('footer');
+  let html = '';
+
+  // Sections arrive pre-ordered from the server (swapped at noon BST)
+  for (const section of data.sections) {
+    html += `<div class="section-header">${section.title}</div>`;
+
+    for (const item of section.stops) {
+      html += `<div class="stop-block">`;
+      html += `<div class="stop-name">${item.stop.name}</div>`;
+
+      // Show departed buses at top (lingering for 15 seconds)
+      const DEPART_LINGER = 15000;
+      const deps = (departedBuses[item.stop.name] || []).filter(d => Date.now() - d.departedAt < DEPART_LINGER);
+      departedBuses[item.stop.name] = deps;
+      for (const dep of deps) {
+        html += `<div class="bus-row departed">`;
+        html += `<div class="bus-route">${item.stop.showRoute ? esc(dep.bus.lineName) : ''}</div>`;
+        html += `<div class="bus-destination">${esc(dep.bus.destinationName)}</div>`;
+        html += `<div class="bus-time departed-text">departed</div>`;
+        html += `<div class="bus-tracking"></div>`;
+        html += `<div class="bus-id">${esc(dep.bus.vehicleId || '')}</div>`;
+        html += `</div>`;
+      }
+
+      if (item.arrivals.length === 0) {
+        html += `<div class="no-buses">> 30 min</div>`;
+      }
+
+      for (const bus of item.arrivals) {
+        const elapsed = (Date.now() - data.fetchedAt) / 1000;
+        const remaining = Math.max(0, Math.round(bus.timeToStation - elapsed));
+        const timeClass = getTimeClass(remaining);
+
+        html += `<div class="bus-row">`;
+        html += `<div class="bus-route">${item.stop.showRoute ? esc(bus.lineName) : ''}</div>`;
+        html += `<div class="bus-destination">${esc(bus.destinationName)}</div>`;
+        html += `<div class="bus-time ${timeClass}">${formatTime(remaining)}</div>`;
+        html += `<div class="bus-tracking">${bus.tracking || ''}</div>`;
+        html += `<div class="bus-id">${esc(bus.vehicleId || '')}</div>`;
+        html += `</div>`;
+      }
+
+      html += `</div>`;
+    }
+  }
+
+  board.innerHTML = html;
+
+  const fetchTime = new Date(data.fetchedAt);
+  const timeStr = fetchTime.toLocaleTimeString('en-GB');
+  footer.innerHTML = `<div class="footer">Last updated: ${timeStr}</div>`;
+}
+
+// ===========================================
+// DEPARTED BUS DETECTION
+// ===========================================
+
+function detectDepartures(newData) {
+  if (!currentData) return;
+  for (const newSection of newData.sections) {
+    for (const newItem of newSection.stops) {
+      const stopName = newItem.stop.name;
+      let oldItem = null;
+      for (const oldSection of currentData.sections) {
+        oldItem = oldSection.stops.find(s => s.stop.name === stopName);
+        if (oldItem) break;
+      }
+      if (!oldItem) continue;
+      const newIds = new Set(newItem.arrivals.map(a => a.vehicleId));
+
+      // Mark vanished buses as departed
+      for (const oldBus of oldItem.arrivals) {
+        if (!newIds.has(oldBus.vehicleId)) {
+          if (!departedBuses[stopName]) departedBuses[stopName] = [];
+          departedBuses[stopName].push({
+            bus: oldBus,
+            departedAt: Date.now()
+          });
+        }
+      }
+
+      // Remove "departed" buses that have reappeared
+      if (departedBuses[stopName]) {
+        departedBuses[stopName] = departedBuses[stopName].filter(
+          d => !newIds.has(d.bus.vehicleId)
+        );
+      }
+    }
+  }
+}
+
+// ===========================================
+// STALE DATA WARNING
+// ===========================================
+
+function checkStale() {
+  if (lastSuccess === 0) return;
+  const age = Date.now() - lastSuccess;
+  if (age > 90000) {
+    showStaleWarning();
+  }
+}
+
+function showStaleWarning() {
+  const board = document.getElementById('board');
+  const secs = Math.round((Date.now() - lastSuccess) / 1000);
+  if (!document.getElementById('stale-warning')) {
+    board.insertAdjacentHTML('afterbegin',
+      `<div id="stale-warning" class="stale-warning">Data is ${secs}s old - connection may be down</div>`);
+  } else {
+    document.getElementById('stale-warning').textContent =
+      `Data is ${secs}s old - connection may be down`;
+  }
+}
+
+function hideStaleWarning() {
+  const el = document.getElementById('stale-warning');
+  if (el) el.remove();
+}
+
+// ===========================================
+// SSE CONNECTION
+// ===========================================
+
+function connectSSE() {
+  if (eventSource) {
+    eventSource.close();
+  }
+
+  eventSource = new EventSource('/events');
+
+  eventSource.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+    detectDepartures(data);
+    currentData = data;
+    lastSuccess = Date.now();
+    hideStaleWarning();
+    render(data);
+  };
+
+  eventSource.onerror = function() {
+    // EventSource will auto-reconnect.
+    // If data stops arriving, the stale warning will trigger via checkStale.
+    console.error('SSE connection error');
+  };
+}
+
+// ===========================================
+// COUNTDOWN TIMER
+// ===========================================
+
+function startCountdown() {
+  clearInterval(countdownTimer);
+  countdownTimer = setInterval(() => {
+    if (currentData) {
+      render(currentData);
+      checkStale();
+    }
+  }, 2000);
+}
+
+// ===========================================
+// VISIBILITY HANDLING
+// ===========================================
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (eventSource) eventSource.close();
+    clearInterval(countdownTimer);
+  } else {
+    connectSSE();
+    startCountdown();
+  }
+});
+
+// ===========================================
+// START
+// ===========================================
+
+connectSSE();
+startCountdown();
+</script>
+
+</body>
+</html>
